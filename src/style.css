@@ -7,6 +7,9 @@
 * {
   -webkit-tap-highlight-color: transparent;
   box-sizing: border-box;
+  /* Disable double-tap-to-zoom (keeps scrolling & pinch-zoom). Stops Safari
+     zooming in when number buttons are tapped quickly during entry. */
+  touch-action: manipulation;
 }
 
 body {

@@ -53,41 +53,43 @@
       </div>
 
       <div v-for="tx in group.transactions" :key="tx.id" class="mx-4 mb-1.5">
-        <div class="flex items-center gap-3 bg-slate-800 rounded-xl px-3 py-3 active:bg-slate-700 transition-colors"
-          @click="handleRowTap(tx)">
-          <!-- Category icon -->
-          <span class="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
-            :style="{ background: catMap[tx.category]?.color + '22', color: catMap[tx.category]?.color ?? '#94a3b8' }">
-            <AppIcon :name="catMap[tx.category]?.icon ?? 'circle-ellipsis'" :size="18" />
-          </span>
-          <!-- Info -->
-          <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium text-slate-100 truncate">{{ catMap[tx.category]?.name ?? tx.category }}</p>
-            <p v-if="tx.notes" class="text-xs text-slate-500 truncate">{{ tx.notes }}</p>
-          </div>
-          <!-- Photo thumbnail -->
-          <img v-if="photoUrls[tx.id]" :src="photoUrls[tx.id]"
-            class="w-9 h-9 rounded-lg object-cover flex-shrink-0 ring-1 ring-slate-600" />
-          <!-- Amount -->
-          <span :class="['text-sm font-semibold flex-shrink-0 ml-1',
-                         tx.type === 'income' ? 'text-green-400' : 'text-orange-400']">
-            {{ tx.type === 'income' ? '+' : '−' }}{{ fmt(tx.amount) }}
-          </span>
-        </div>
+        <div class="relative overflow-hidden rounded-xl">
+          <!-- Delete action, revealed by swiping the row left -->
+          <button type="button"
+            class="absolute inset-y-0 right-0 w-[84px] flex flex-col items-center justify-center gap-0.5 bg-red-600 text-white active:bg-red-700"
+            @click="onDeleteClick(tx)">
+            <AppIcon name="trash" :size="18" />
+            <span class="text-[11px] font-medium">Löschen</span>
+          </button>
 
-        <!-- Delete confirm -->
-        <Transition name="delete-row">
-          <div v-if="pendingDeleteId === tx.id" class="flex gap-2 mt-1 px-0.5">
-            <button @click="pendingDeleteId = null"
-              class="flex-1 py-2 rounded-xl text-xs font-medium bg-slate-700 text-slate-300 active:bg-slate-600">
-              Abbrechen
-            </button>
-            <button @click="deleteTransaction(tx.id)"
-              class="flex-1 py-2 rounded-xl text-xs font-medium bg-red-900 text-red-300 active:bg-red-800">
-              Löschen
-            </button>
+          <!-- Swipeable foreground row -->
+          <div class="swipe-row relative flex items-center gap-3 bg-slate-800 px-3 py-3 active:bg-slate-700"
+            :class="{ 'swipe-row--dragging': dragId === tx.id }"
+            :style="{ transform: `translateX(${offsetFor(tx.id)}px)` }"
+            @touchstart.passive="onTouchStart($event, tx.id)"
+            @touchmove.passive="onTouchMove($event, tx.id)"
+            @touchend="onTouchEnd(tx.id)"
+            @click="onRowClick(tx)">
+            <!-- Category icon -->
+            <span class="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+              :style="{ background: catMap[tx.category]?.color + '22', color: catMap[tx.category]?.color ?? '#94a3b8' }">
+              <AppIcon :name="catMap[tx.category]?.icon ?? 'circle-ellipsis'" :size="18" />
+            </span>
+            <!-- Info -->
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-slate-100 truncate">{{ catMap[tx.category]?.name ?? tx.category }}</p>
+              <p v-if="tx.notes" class="text-xs text-slate-500 truncate">{{ tx.notes }}</p>
+            </div>
+            <!-- Photo thumbnail -->
+            <img v-if="photoUrls[tx.id]" :src="photoUrls[tx.id]"
+              class="w-9 h-9 rounded-lg object-cover flex-shrink-0 ring-1 ring-slate-600" />
+            <!-- Amount -->
+            <span :class="['text-sm font-semibold flex-shrink-0 ml-1',
+                           tx.type === 'income' ? 'text-green-400' : 'text-orange-400']">
+              {{ tx.type === 'income' ? '+' : '−' }}{{ fmt(tx.amount) }}
+            </span>
           </div>
-        </Transition>
+        </div>
       </div>
     </div>
 
@@ -118,8 +120,14 @@ const transactions  = ref([])
 const categories    = ref([])
 const photoUrls     = ref({})
 const searchQuery   = ref('')
-const pendingDeleteId = ref(null)
 const lightboxUrl   = ref(null)
+
+// ── Swipe-to-delete state ────────────────────────────────────────────────────
+const SWIPE_W = 84          // px the row slides to reveal the delete button
+const openId  = ref(null)   // row whose delete button is currently revealed
+const dragId  = ref(null)   // row being actively dragged
+const dragX   = ref(0)      // live horizontal offset while dragging
+let swipeStartX = 0, swipeStartY = 0, swipeBaseX = 0, swipeAxis = null, swipeMoved = false
 
 // ── Load ───────────────────────────────────────────────────────────────────
 
@@ -200,15 +208,58 @@ function shiftMonth(delta) {
   if (m > 11) { m = 0; y++ }
   if (m < 0)  { m = 11; y-- }
   viewMonth.value = m; viewYear.value = y
-  pendingDeleteId.value = null
+  openId.value = null
 }
 
-function handleRowTap(tx) {
-  if (photoUrls.value[tx.id]) {
-    lightboxUrl.value = photoUrls.value[tx.id]
-    return
+// ── Swipe-to-delete ──────────────────────────────────────────────────────────
+
+function offsetFor(id) {
+  if (dragId.value === id) return dragX.value
+  return openId.value === id ? -SWIPE_W : 0
+}
+
+function onTouchStart(e, id) {
+  swipeStartX = e.touches[0].clientX
+  swipeStartY = e.touches[0].clientY
+  swipeAxis = null
+  swipeMoved = false
+  swipeBaseX = openId.value === id ? -SWIPE_W : 0
+  if (openId.value && openId.value !== id) openId.value = null  // close any other open row
+  dragId.value = id
+  dragX.value = swipeBaseX
+}
+
+function onTouchMove(e, id) {
+  if (dragId.value !== id) return
+  const dx = e.touches[0].clientX - swipeStartX
+  const dy = e.touches[0].clientY - swipeStartY
+  if (swipeAxis === null) {
+    if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return
+    swipeAxis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y'
   }
-  pendingDeleteId.value = pendingDeleteId.value === tx.id ? null : tx.id
+  if (swipeAxis === 'y') { dragId.value = null; return }   // vertical scroll → abandon swipe
+  swipeMoved = true
+  let next = swipeBaseX + dx
+  if (next > 0) next = 0
+  if (next < -SWIPE_W) next = -SWIPE_W
+  dragX.value = next
+}
+
+function onTouchEnd(id) {
+  if (dragId.value !== id) return
+  const shouldOpen = dragX.value < -SWIPE_W / 2
+  dragId.value = null
+  openId.value = shouldOpen ? id : (openId.value === id ? null : openId.value)
+}
+
+function onRowClick(tx) {
+  if (swipeMoved) { swipeMoved = false; return }      // ignore click synthesised after a swipe
+  if (openId.value) { openId.value = null; return }   // tap closes an open row
+  if (photoUrls.value[tx.id]) lightboxUrl.value = photoUrls.value[tx.id]
+}
+
+function onDeleteClick(tx) {
+  deleteTransaction(tx.id)
 }
 
 async function deleteTransaction(id) {
@@ -217,13 +268,14 @@ async function deleteTransaction(id) {
   if (deleted?.photo && photoUrls.value[id]) URL.revokeObjectURL(photoUrls.value[id])
   delete photoUrls.value[id]
   transactions.value = transactions.value.filter(t => t.id !== id)
-  pendingDeleteId.value = null
+  if (openId.value === id) openId.value = null
 }
 </script>
 
 <style scoped>
-.delete-row-enter-active, .delete-row-leave-active { transition: opacity 0.15s, transform 0.15s; }
-.delete-row-enter-from, .delete-row-leave-to { opacity: 0; transform: translateY(-6px); }
+/* Swipe-to-delete: vertical scroll stays with the browser, horizontal swipe comes to us */
+.swipe-row { touch-action: pan-y; transition: transform 0.2s ease; will-change: transform; }
+.swipe-row--dragging { transition: none; }
 
 .lightbox {
   position: fixed; inset: 0; z-index: 200;
